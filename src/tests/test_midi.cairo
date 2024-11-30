@@ -547,4 +547,139 @@ mod tests {
             };
         };
     }
+
+    #[test]
+    #[available_gas(100000000000)]
+    fn loop_section_test() {
+        let mut eventlist = ArrayTrait::<Message>::new();
+
+        // Create some test events at different times
+        let newnoteon1 = NoteOn {
+            channel: 0, note: 60, velocity: 100, time: FP32x32 { mag: 0, sign: false }
+        };
+
+        let newnoteon2 = NoteOn {
+            channel: 0, note: 71, velocity: 100, time: FP32x32 { mag: 1000, sign: false }
+        };
+
+        let newnoteon3 = NoteOn {
+            channel: 0, note: 90, velocity: 100, time: FP32x32 { mag: 2000, sign: false }
+        };
+
+        let newnoteoff1 = NoteOff {
+            channel: 0, note: 60, velocity: 100, time: FP32x32 { mag: 500, sign: false }
+        };
+
+        let newnoteoff2 = NoteOff {
+            channel: 0, note: 71, velocity: 100, time: FP32x32 { mag: 1500, sign: false }
+        };
+
+        let newnoteoff3 = NoteOff {
+            channel: 0, note: 90, velocity: 100, time: FP32x32 { mag: 2500, sign: false }
+        };
+
+        // Add some control changes and program changes to test non-note events
+        let cc = ControlChange {
+            channel: 0,
+            control: 7,
+            value: 100,
+            time: FP32x32 { mag: 1200, sign: false }
+        };
+
+        let pc = ProgramChange {
+            channel: 0,
+            program: 1,
+            time: FP32x32 { mag: 800, sign: false }
+        };
+
+        // Create messages
+        let notemessageon1 = Message::NOTE_ON(newnoteon1);
+        let notemessageon2 = Message::NOTE_ON(newnoteon2);
+        let notemessageon3 = Message::NOTE_ON(newnoteon3);
+        let notemessageoff1 = Message::NOTE_OFF(newnoteoff1);
+        let notemessageoff2 = Message::NOTE_OFF(newnoteoff2);
+        let notemessageoff3 = Message::NOTE_OFF(newnoteoff3);
+        let ccmessage = Message::CONTROL_CHANGE(cc);
+        let pcmessage = Message::PROGRAM_CHANGE(pc);
+
+        // Add events to list
+        eventlist.append(notemessageon1);
+        eventlist.append(notemessageoff1);
+        eventlist.append(pcmessage);
+        eventlist.append(notemessageon2);
+        eventlist.append(ccmessage);
+        eventlist.append(notemessageoff2);
+        eventlist.append(notemessageon3);
+        eventlist.append(notemessageoff3);
+
+        let midiobj = Midi { events: eventlist.span() };
+
+        // Loop section from 1000 to 2000, 2 times
+        let start_time = FP32x32 { mag: 1000, sign: false };
+        let end_time = FP32x32 { mag: 2000, sign: false };
+        let looped = midiobj.loop_section(start_time, end_time, 2);
+
+        // Test the resulting MIDI object
+        let mut ev = looped.events;
+        let mut event_count: u32 = 0;
+        let mut events_in_loop_section: u256 = 0;
+        let section_length = end_time - start_time;
+
+        loop {
+            match ev.pop_front() {
+                Option::Some(currentevent) => {
+                    event_count += 1;
+                    
+                    match currentevent {
+                        Message::NOTE_ON(NoteOn) => {
+                            let time = *NoteOn.time;
+                            // Check if event is in original loop section or repeated sections
+                            if time >= start_time && time <= end_time {
+                                events_in_loop_section += 1;
+                            } else if time > end_time {
+                                // For events after loop section, verify they're properly shifted
+                                assert(
+                                    time >= end_time + section_length,
+                                    'improperly shifted'
+                                );
+                            }
+                        },
+                        Message::NOTE_OFF(NoteOff) => {
+                            let time = *NoteOff.time;
+                            if time >= start_time && time <= end_time {
+                                events_in_loop_section += 1;
+                            }
+                        },
+                        Message::CONTROL_CHANGE(ControlChange) => {
+                            let time = *ControlChange.time;
+                            if time >= start_time && time <= end_time {
+                                events_in_loop_section += 1;
+                            }
+                        },
+                        Message::PROGRAM_CHANGE(ProgramChange) => {
+                            let time = *ProgramChange.time;
+                            if time >= start_time && time <= end_time {
+                                events_in_loop_section += 1;
+                            }
+                        },
+                        _ => {},
+                    }
+                },
+                Option::None(_) => { break; }
+            };
+        };
+
+        // Verify the total number of events
+        // Original events + (events in loop section × (repeats - 1))
+        assert(event_count > midiobj.events.len(), 'found less loops');
+        
+        // Verify we have the correct number of events in the loop section
+        assert(events_in_loop_section > 0, 'emptyloop section');
+        
+        // Original events in section should be repeated
+        assert(
+            events_in_loop_section == 4 * 2, // 4 events in original section × 2 repeats
+            'incorrect number of loops'
+        );
+    }
 }
