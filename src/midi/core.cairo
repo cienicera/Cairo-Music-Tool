@@ -1,4 +1,5 @@
 use core::traits::TryInto;
+use core::traits::Into;
 use orion::operators::tensor::{Tensor, U32Tensor,};
 use orion::numbers::FP32x32;
 use core::option::OptionTrait;
@@ -51,6 +52,8 @@ trait MidiTrait {
     fn arpeggiate_chords(self: @Midi, pattern: ArpPattern) -> Midi;
     /// Add or modify dynamics (velocity) of notes based on a specified curve or pattern.
     fn edit_dynamics(self: @Midi, curve: VelocityCurve) -> Midi;
+    // Cairo function that converts a Midi struct to a ByteArray representing a MIDI file
+    fn midi_to_bytearray(self: @Midi) -> ByteArray;
 }
 
 impl MidiImpl of MidiTrait {
@@ -825,5 +828,107 @@ impl MidiImpl of MidiTrait {
         };
 
         Midi { events: eventlist.span() }
+    }
+
+    fn midi_to_bytearray(self: @Midi) -> ByteArray {
+        let mut output = ByteArray::new();
+        
+        // Write header chunk
+        output.append(@"MThd".into());
+        output.append(@(6_u32).to_be_bytes());
+        output.append(@(1_u16).to_be_bytes());
+        output.append(@(1_u16).to_be_bytes());
+        output.append(@(96_u16).to_be_bytes());
+
+        // Write track chunk
+        output.append(@"MTrk".into());
+        
+        // Placeholder for track length (we'll update this later)
+        let track_length_pos = output.len();
+        output.append(@(0_u32).to_be_bytes());
+
+        let mut last_time = 0;
+        let mut events = *self.events;
+
+        loop {
+            match events.pop_front() {
+                Option::Some(event) => {
+                    match event {
+                        Message::NOTE_ON(note_on) => {
+                            write_variable_length(&mut output, *note_on.time - last_time);
+                            output.append(@(0x90 | *note_on.channel).to_be_bytes());
+                            output.append(@(*note_on.note).to_be_bytes());
+                            output.append(@(*note_on.velocity).to_be_bytes());
+                            last_time = *note_on.time;
+                        },
+                        Message::NOTE_OFF(note_off) => {
+                            write_variable_length(&mut output, *note_off.time - last_time);
+                            output.append(@(0x80 | *note_off.channel).to_be_bytes());
+                            output.append(@(*note_off.note).to_be_bytes());
+                            output.append(@(*note_off.velocity).to_be_bytes());
+                            last_time = *note_off.time;
+                        },
+                        Message::SET_TEMPO(set_tempo) => {
+                            write_variable_length(&mut output, *set_tempo.time.unwrap_or(0) - last_time);
+                            output.append(@(0xFF_u8).to_be_bytes());
+                            output.append(@(0x51_u8).to_be_bytes());
+                            output.append(@(3_u8).to_be_bytes());
+                            output.append(@(*set_tempo.tempo).to_be_bytes());
+                            last_time = *set_tempo.time.unwrap_or(0);
+                        },
+                        Message::TIME_SIGNATURE(time_sig) => {
+                            write_variable_length(&mut output, *time_sig.time.unwrap_or(0) - last_time);
+                            output.append(@(0xFF_u8).to_be_bytes());
+                            output.append(@(0x58_u8).to_be_bytes()); 
+                            output.append(@(4_u8).to_be_bytes()); 
+                            output.append(@(*time_sig.numerator).to_be_bytes());
+                            output.append(@(*time_sig.denominator).to_be_bytes());
+                            output.append(@(*time_sig.clocks_per_click).to_be_bytes());
+                            output.append(@(32_u8).to_be_bytes()); 
+                            last_time = *time_sig.time.unwrap_or(0);
+                        },
+                        _ => {}, 
+                    }
+                },
+                Option::None => { break; },
+            }
+        }
+
+        // Write end of track
+        write_variable_length(&mut output, 0);
+        output.append(@(0xFF_u8).to_be_bytes());
+        output.append(@(0x2F_u8).to_be_bytes());
+        output.append(@(0_u8).to_be_bytes());
+
+        // Update track length
+        let track_length = output.len() - track_length_pos - 4;
+        let track_length_bytes = (track_length as u32).to_be_bytes();
+        for i in 0..4 {
+            output.set(track_length_pos + i, *track_length_bytes[i]);
+        }
+
+        output
+    }
+}
+
+// Helper function to write variable-length quantities
+fn write_variable_length(output: &mut ByteArray, mut value: u32) {
+    if value == 0 {
+        output.append(@(0_u8).to_be_bytes());
+        return;
+    }
+
+    let mut buffer = ArrayTrait::new();
+    while value > 0 {
+        buffer.append(((value & 0x7F) | 0x80) as u8);
+        value >>= 7;
+    }
+    *buffer.at(buffer.len() - 1) &= 0x7F;
+
+    let mut i = buffer.len();
+    loop {
+        if i == 0 { break; }
+        i -= 1;
+        output.append(@(*buffer[i]).to_be_bytes());
     }
 }
