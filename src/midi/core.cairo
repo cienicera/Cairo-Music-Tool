@@ -51,6 +51,8 @@ trait MidiTrait {
     fn arpeggiate_chords(self: @Midi, pattern: ArpPattern) -> Midi;
     /// Add or modify dynamics (velocity) of notes based on a specified curve or pattern.
     fn edit_dynamics(self: @Midi, curve: VelocityCurve) -> Midi;
+    /// Repeat a specified section of MIDI data
+    fn loop_section(self: @Midi, start: FP32x32, end: FP32x32, repeats: u32) -> Midi;
 }
 
 impl MidiImpl of MidiTrait {
@@ -818,6 +820,348 @@ impl MidiImpl of MidiTrait {
                         Message::SYSTEM_EXCLUSIVE(_SystemExclusive) => {
                             eventlist.append(*currentevent);
                         },
+                    }
+                },
+                Option::None(_) => { break; }
+            };
+        };
+
+        Midi { events: eventlist.span() }
+    }
+
+    fn loop_section(self: @Midi, start: FP32x32, end: FP32x32, repeats: u32) -> Midi {
+        let mut eventlist = ArrayTrait::<Message>::new();
+        let section_length = end - start;
+
+        // First add all events before the loop section
+        let mut pre_loop = self.clone().events;
+        loop {
+            match pre_loop.pop_front() {
+                Option::Some(currentevent) => {
+                    let current_time = match currentevent {
+                        Message::NOTE_ON(NoteOn) => *NoteOn.time,
+                        Message::NOTE_OFF(NoteOff) => *NoteOff.time,
+                        Message::SET_TEMPO(SetTempo) => match *SetTempo.time {
+                            Option::Some(time) => time,
+                            Option::None => FP32x32 { mag: 0, sign: false },
+                        },
+                        Message::TIME_SIGNATURE(TimeSignature) => match *TimeSignature.time {
+                            Option::Some(time) => time,
+                            Option::None => FP32x32 { mag: 0, sign: false },
+                        },
+                        Message::CONTROL_CHANGE(ControlChange) => *ControlChange.time,
+                        Message::PITCH_WHEEL(PitchWheel) => *PitchWheel.time,
+                        Message::AFTER_TOUCH(AfterTouch) => *AfterTouch.time,
+                        Message::POLY_TOUCH(PolyTouch) => *PolyTouch.time,
+                        Message::PROGRAM_CHANGE(ProgramChange) => *ProgramChange.time,
+                        Message::SYSTEM_EXCLUSIVE(SystemExclusive) => *SystemExclusive.time,
+                    };
+
+                    if current_time < start {
+                        eventlist.append(*currentevent);
+                    }
+                },
+                Option::None(_) => { break; }
+            };
+        };
+
+        // Then add the loop section repeated times
+        let mut i: u32 = 0;
+        loop {
+            if i >= repeats {
+                break;
+            }
+
+            let mut loop_events = self.clone().events;
+            loop {
+                match loop_events.pop_front() {
+                    Option::Some(currentevent) => {
+                        let (current_time, shifted_event) = match currentevent {
+                            Message::NOTE_ON(NoteOn) => {
+                                let time = *NoteOn.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_note = NoteOn {
+                                        channel: *NoteOn.channel,
+                                        note: *NoteOn.note,
+                                        velocity: *NoteOn.velocity,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::NOTE_ON(new_note))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::NOTE_OFF(NoteOff) => {
+                                let time = *NoteOff.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_note = NoteOff {
+                                        channel: *NoteOff.channel,
+                                        note: *NoteOff.note,
+                                        velocity: *NoteOff.velocity,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::NOTE_OFF(new_note))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::SET_TEMPO(SetTempo) => {
+                                let time = match *SetTempo.time {
+                                    Option::Some(t) => t,
+                                    Option::None => FP32x32 { mag: 0, sign: false }
+                                };
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_tempo = SetTempo {
+                                        tempo: *SetTempo.tempo,
+                                        time: Option::Some(shifted_time),
+                                    };
+                                    (time, Message::SET_TEMPO(new_tempo))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::TIME_SIGNATURE(TimeSignature) => {
+                                let time = match *TimeSignature.time {
+                                    Option::Some(t) => t,
+                                    Option::None => FP32x32 { mag: 0, sign: false }
+                                };
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_timesig = TimeSignature {
+                                        numerator: *TimeSignature.numerator,
+                                        denominator: *TimeSignature.denominator,
+                                        clocks_per_click: *TimeSignature.clocks_per_click,
+                                        time: Option::Some(shifted_time),
+                                    };
+                                    (time, Message::TIME_SIGNATURE(new_timesig))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::CONTROL_CHANGE(ControlChange) => {
+                                let time = *ControlChange.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_cc = ControlChange {
+                                        channel: *ControlChange.channel,
+                                        control: *ControlChange.control,
+                                        value: *ControlChange.value,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::CONTROL_CHANGE(new_cc))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::PITCH_WHEEL(PitchWheel) => {
+                                let time = *PitchWheel.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_pw = PitchWheel {
+                                        channel: *PitchWheel.channel,
+                                        pitch: *PitchWheel.pitch,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::PITCH_WHEEL(new_pw))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::AFTER_TOUCH(AfterTouch) => {
+                                let time = *AfterTouch.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_at = AfterTouch {
+                                        channel: *AfterTouch.channel,
+                                        value: *AfterTouch.value,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::AFTER_TOUCH(new_at))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::POLY_TOUCH(PolyTouch) => {
+                                let time = *PolyTouch.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_pt = PolyTouch {
+                                        channel: *PolyTouch.channel,
+                                        note: *PolyTouch.note,
+                                        value: *PolyTouch.value,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::POLY_TOUCH(new_pt))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::PROGRAM_CHANGE(ProgramChange) => {
+                                let time = *ProgramChange.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_pc = ProgramChange {
+                                        channel: *ProgramChange.channel,
+                                        program: *ProgramChange.program,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::PROGRAM_CHANGE(new_pc))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                            Message::SYSTEM_EXCLUSIVE(SystemExclusive) => {
+                                let time = *SystemExclusive.time;
+                                if time >= start && time <= end {
+                                    let shifted_time = time + (section_length * FP32x32 { mag: i.into(), sign: false });
+                                    let new_sysex = SystemExclusive {
+                                        manufacturer_id: *SystemExclusive.manufacturer_id,
+                                        device_id: *SystemExclusive.device_id,
+                                        data: *SystemExclusive.data,
+                                        checksum: *SystemExclusive.checksum,
+                                        time: shifted_time,
+                                    };
+                                    (time, Message::SYSTEM_EXCLUSIVE(new_sysex))
+                                } else {
+                                    (time, *currentevent)
+                                }
+                            },
+                        };
+
+                        if current_time >= start && current_time <= end {
+                            eventlist.append(shifted_event);
+                        }
+                    },
+                    Option::None(_) => { break; }
+                };
+            };
+            i += 1;
+        };
+
+        // Finally add all events after the loop section
+        let mut post_loop = self.clone().events;
+        loop {
+            match post_loop.pop_front() {
+                Option::Some(currentevent) => {
+                    let current_time = match currentevent {
+                        Message::NOTE_ON(NoteOn) => *NoteOn.time,
+                        Message::NOTE_OFF(NoteOff) => *NoteOff.time,
+                        Message::SET_TEMPO(SetTempo) => match *SetTempo.time {
+                            Option::Some(time) => time,
+                            Option::None => FP32x32 { mag: 0, sign: false },
+                        },
+                        Message::TIME_SIGNATURE(TimeSignature) => match *TimeSignature.time {
+                            Option::Some(time) => time,
+                            Option::None => FP32x32 { mag: 0, sign: false },
+                        },
+                        Message::CONTROL_CHANGE(ControlChange) => *ControlChange.time,
+                        Message::PITCH_WHEEL(PitchWheel) => *PitchWheel.time,
+                        Message::AFTER_TOUCH(AfterTouch) => *AfterTouch.time,
+                        Message::POLY_TOUCH(PolyTouch) => *PolyTouch.time,
+                        Message::PROGRAM_CHANGE(ProgramChange) => *ProgramChange.time,
+                        Message::SYSTEM_EXCLUSIVE(SystemExclusive) => *SystemExclusive.time,
+                    };
+
+                    if current_time > end {
+                        let shifted_time = current_time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false });
+                        let shifted_event = match currentevent {
+                            Message::NOTE_ON(NoteOn) => {
+                                let new_note = NoteOn {
+                                    channel: *NoteOn.channel,
+                                    note: *NoteOn.note,
+                                    velocity: *NoteOn.velocity,
+                                    time: shifted_time,
+                                };
+                                Message::NOTE_ON(new_note)
+                            },
+                            Message::NOTE_OFF(NoteOff) => {
+                                let new_note = NoteOff {
+                                    channel: *NoteOff.channel,
+                                    note: *NoteOff.note,
+                                    velocity: *NoteOff.velocity,
+                                    time: shifted_time,
+                                };
+                                Message::NOTE_OFF(new_note)
+                            },
+                            Message::SET_TEMPO(SetTempo) => {
+                                let new_tempo = SetTempo {
+                                    tempo: *SetTempo.tempo,
+                                    time: match *SetTempo.time {
+                                        Option::Some(time) => Option::Some(time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })),
+                                        Option::None => Option::None,
+                                    }
+                                };
+                                Message::SET_TEMPO(new_tempo)
+                            },
+                            Message::TIME_SIGNATURE(TimeSignature) => {
+                                let new_timesig = TimeSignature {
+                                    numerator: *TimeSignature.numerator,
+                                    denominator: *TimeSignature.denominator,
+                                    clocks_per_click: *TimeSignature.clocks_per_click,
+                                    time: match *TimeSignature.time {
+                                        Option::Some(time) => Option::Some(time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })),
+                                        Option::None => Option::None,
+                                    }
+                                };
+                                Message::TIME_SIGNATURE(new_timesig)
+                            },
+                            Message::CONTROL_CHANGE(ControlChange) => {
+                                let new_cc = ControlChange {
+                                    channel: *ControlChange.channel,
+                                    control: *ControlChange.control,
+                                    value: *ControlChange.value,
+                                    time: *ControlChange.time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })
+                                };
+                                Message::CONTROL_CHANGE(new_cc)
+                            },
+                            Message::PITCH_WHEEL(PitchWheel) => {
+                                let new_pw = PitchWheel {
+                                    channel: *PitchWheel.channel,
+                                    pitch: *PitchWheel.pitch,
+                                    time: *PitchWheel.time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })
+                                };
+                                Message::PITCH_WHEEL(new_pw)
+                            },
+                            Message::AFTER_TOUCH(AfterTouch) => {
+                                let new_at = AfterTouch {
+                                    channel: *AfterTouch.channel,
+                                    value: *AfterTouch.value,
+                                    time: *AfterTouch.time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })
+                                };
+                                Message::AFTER_TOUCH(new_at)
+                            },
+                            Message::POLY_TOUCH(PolyTouch) => {
+                                let new_pt = PolyTouch {
+                                    channel: *PolyTouch.channel,
+                                    note: *PolyTouch.note,
+                                    value: *PolyTouch.value,
+                                    time: *PolyTouch.time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })
+                                };
+                                Message::POLY_TOUCH(new_pt)
+                            },
+                            Message::PROGRAM_CHANGE(ProgramChange) => {
+                                let new_pc = ProgramChange {
+                                    channel: *ProgramChange.channel,
+                                    program: *ProgramChange.program,
+                                    time: *ProgramChange.time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })
+                                };
+                                Message::PROGRAM_CHANGE(new_pc)
+                            },
+                            Message::SYSTEM_EXCLUSIVE(SystemExclusive) => {
+                                let new_sysex = SystemExclusive {
+                                    manufacturer_id: *SystemExclusive.manufacturer_id,
+                                    device_id: *SystemExclusive.device_id,
+                                    data: *SystemExclusive.data,
+                                    checksum: *SystemExclusive.checksum,
+                                    time: *SystemExclusive.time + (section_length * FP32x32 { mag: (repeats - 1).into(), sign: false })
+                                };
+                                Message::SYSTEM_EXCLUSIVE(new_sysex)
+                            },
+                        };
+                        eventlist.append(shifted_event);
                     }
                 },
                 Option::None(_) => { break; }
